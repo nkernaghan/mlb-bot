@@ -5,14 +5,27 @@ from config import MARKET_WEIGHT, MODEL_WEIGHT, HOME_ADVANTAGE_RUNS
 
 
 def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
-                 bullpen_home, bullpen_away, park, umpire, weather, odds):
-    """Run the 13-factor game prediction model.
+                 bullpen_home, bullpen_away, park, umpire, weather, odds,
+                 home_injuries=None, away_injuries=None,
+                 home_rest=None, away_rest=None):
+    """Run the game prediction model.
 
     Returns a prediction dict with projected winner, edge, confidence, grade.
     """
     reasons = []
     risks = []
     contradictions = 0
+
+    # --- Injury impact ---
+    home_il_pitchers = [i for i in (home_injuries or []) if i.get("position") == "P"]
+    away_il_pitchers = [i for i in (away_injuries or []) if i.get("position") == "P"]
+    home_il_hitters = [i for i in (home_injuries or []) if i.get("position") != "P"]
+    away_il_hitters = [i for i in (away_injuries or []) if i.get("position") != "P"]
+
+    if len(home_il_hitters) >= 3:
+        risks.append(f"{game['home_team_name']} has {len(home_il_hitters)} position players on IL")
+    if len(away_il_hitters) >= 3:
+        risks.append(f"{game['away_team_name']} has {len(away_il_hitters)} position players on IL")
 
     # --- Signal 1: Starting pitcher quality (xERA primary, ERA fallback) ---
     home_p_quality = _pitcher_quality_score(home_pitcher)
@@ -41,14 +54,28 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
     if home_barrel_matchup > 3 or away_barrel_matchup > 3:
         risks.append("Elevated barrel rate matchup — potential blowout risk")
 
-    # --- Signal 4: Bullpen ---
+    # --- Signal 4: Bullpen (ERA + WHIP composite) ---
     bp_home_era = bullpen_home.get("bullpen_era", 4.0) or 4.0
     bp_away_era = bullpen_away.get("bullpen_era", 4.0) or 4.0
-    bp_edge = bp_away_era - bp_home_era  # Positive = home bullpen better
+    bp_home_whip = bullpen_home.get("bullpen_whip", 1.30) or 1.30
+    bp_away_whip = bullpen_away.get("bullpen_whip", 1.30) or 1.30
+
+    # Composite: ERA (70%) + WHIP-derived run proxy (30%). WHIP 1.0 ≈ 3.0 ERA equivalent.
+    bp_home_composite = bp_home_era * 0.7 + (bp_home_whip * 3.0) * 0.3
+    bp_away_composite = bp_away_era * 0.7 + (bp_away_whip * 3.0) * 0.3
+    bp_edge = bp_away_composite - bp_home_composite  # Positive = home bullpen better
 
     if abs(bp_edge) > 0.5:
         better = "home" if bp_edge > 0 else "away"
-        reasons.append(f"Bullpen edge: {game[f'{better}_team_name']} ({min(bp_home_era, bp_away_era):.2f} ERA)")
+        reasons.append(f"Bullpen edge: {game[f'{better}_team_name']} ({min(bp_home_era, bp_away_era):.2f} ERA, {min(bp_home_whip, bp_away_whip):.2f} WHIP)")
+
+    # Bullpen fatigue adjustment
+    if bullpen_home.get("fatigued"):
+        bp_edge -= 0.3  # Fatigued home bullpen = less reliable
+        risks.append(f"{game['home_team_name']} bullpen fatigued ({bullpen_home.get('pitchers_no_rest', 0)} arms with 0 days rest)")
+    if bullpen_away.get("fatigued"):
+        bp_edge += 0.3  # Fatigued away bullpen = advantage for home
+        risks.append(f"{game['away_team_name']} bullpen fatigued ({bullpen_away.get('pitchers_no_rest', 0)} arms with 0 days rest)")
 
     # --- Signal 5: Park factors ---
     run_factor = (park.get("run_factor", 100) or 100) / 100
@@ -71,6 +98,43 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
     # --- Signal 7: Home advantage ---
     home_adj = HOME_ADVANTAGE_RUNS
 
+    # --- Signal 8: Recent form (last 3-5 starts) ---
+    recent_form_adj = 0
+    home_recent_era = home_pitcher.get("recent_era")
+    away_recent_era = away_pitcher.get("recent_era")
+    home_season_era = home_pitcher.get("era")
+    away_season_era = away_pitcher.get("era")
+
+    if home_recent_era and home_season_era and home_season_era > 0:
+        home_form_delta = home_season_era - home_recent_era  # Positive = pitching better recently
+        recent_form_adj += home_form_delta * 0.15
+        if home_form_delta > 1.0:
+            reasons.append(f"{game['home_pitcher_name']} hot — recent ERA {home_recent_era:.2f} vs season {home_season_era:.2f}")
+        elif home_form_delta < -1.0:
+            risks.append(f"{game['home_pitcher_name']} struggling — recent ERA {home_recent_era:.2f} vs season {home_season_era:.2f}")
+
+    if away_recent_era and away_season_era and away_season_era > 0:
+        away_form_delta = away_season_era - away_recent_era
+        recent_form_adj -= away_form_delta * 0.15  # Subtract because away pitcher improving hurts home team
+
+    # --- Signal 9: Travel/rest ---
+    travel_adj = 0
+    home_rest = home_rest or {}
+    away_rest = away_rest or {}
+
+    # Away team traveled to a new city = slight disadvantage
+    if away_rest.get("traveled"):
+        travel_adj += 0.1  # Slight home advantage boost
+        risks.append(f"{game['away_team_name']} traveled (new city)")
+
+    # Team coming off a day off = slight advantage (fresher bullpen, rested lineup)
+    if home_rest.get("days_off", 0) > 0 and away_rest.get("days_off", 0) == 0:
+        travel_adj += 0.1
+        reasons.append(f"{game['home_team_name']} rested (day off)")
+    elif away_rest.get("days_off", 0) > 0 and home_rest.get("days_off", 0) == 0:
+        travel_adj -= 0.1
+        reasons.append(f"{game['away_team_name']} rested (day off)")
+
     # --- Combine model signals into projected run differential ---
     pitcher_run_diff = -pitcher_edge
     lineup_run_diff = lineup_edge * 0.3
@@ -81,6 +145,8 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
         lineup_run_diff +
         bp_run_diff +
         home_adj +
+        recent_form_adj +
+        travel_adj +
         park_adjustment * 0.1 +
         weather_adj * 0.1
     )
@@ -103,6 +169,20 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
            (model_implied_home < 0.5 and market_implied_home > 0.55):
             contradictions += 1
             risks.append("Model and market disagree on winner")
+
+    # --- Reverse Line Movement (sharp money signal) ---
+    rlm = odds.get("rlm_signal") if odds else None
+    if rlm:
+        rlm_dir = rlm["direction"]
+        rlm_div = abs(rlm["divergence"])
+        # Adjust blended probability toward sharp money direction
+        rlm_adj = rlm_div * 0.005  # 2% divergence = 1% prob adjustment
+        if rlm_dir == "home":
+            blended_home_prob = min(0.85, blended_home_prob + rlm_adj)
+            reasons.append(f"Sharp money favors {game['home_team_name']} ({rlm_div:.1f}% book divergence)")
+        else:
+            blended_home_prob = max(0.15, blended_home_prob - rlm_adj)
+            reasons.append(f"Sharp money favors {game['away_team_name']} ({rlm_div:.1f}% book divergence)")
 
     # --- Determine pick: find where the VALUE is ---
     # Start with the blended favorite
@@ -198,24 +278,36 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
 
 
 def _pitcher_quality_score(pitcher):
-    """Score pitcher quality. Lower = better pitcher. Uses xERA primary, FIP secondary, ERA fallback."""
-    xera = pitcher.get("xera")
-    fip = pitcher.get("fip")
-    era = pitcher.get("era")
+    """Score pitcher quality. Lower = better pitcher.
 
-    if xera and fip:
-        return xera * 0.6 + fip * 0.4
-    elif xera:
-        return xera
-    elif fip:
-        return fip
-    elif era:
-        return era
+    Weighted ensemble: xERA (30%), FIP (25%), xFIP (20%), SIERA (15%), ERA (10%).
+    Falls back gracefully when metrics are missing, re-normalizing weights.
+    """
+    metrics = {
+        "xera": (pitcher.get("xera"), 0.30),
+        "fip": (pitcher.get("fip"), 0.25),
+        "xfip": (pitcher.get("xfip"), 0.20),
+        "siera": (pitcher.get("siera"), 0.15),
+        "era": (pitcher.get("era"), 0.10),
+    }
+
+    total_weight = 0
+    weighted_sum = 0
+    for val, weight in metrics.values():
+        if val and val > 0:
+            weighted_sum += val * weight
+            total_weight += weight
+
+    if total_weight > 0:
+        return weighted_sum / total_weight
     return 4.50  # League average fallback
 
 
 def _lineup_score(batting, opposing_pitcher):
-    """Score a lineup's expected output against the opposing pitcher."""
+    """Score a lineup's expected output against the opposing pitcher.
+
+    Uses platoon splits when available — lineups hit differently vs LHP and RHP.
+    """
     ops = batting.get("ops") or batting.get("team_ops") or 0.700
     wrc = batting.get("wrc_plus", 100) or 100
     k_rate = batting.get("k_rate") or batting.get("team_k_rate") or 22
@@ -223,8 +315,18 @@ def _lineup_score(batting, opposing_pitcher):
     pitcher_hand = opposing_pitcher.get("throws")
     if pitcher_hand == "L":
         split_ops = batting.get("vs_lhp_ops")
-        if split_ops:
+        split_k = batting.get("vs_lhp_k_rate")
+        if split_ops and split_ops > 0:
             ops = split_ops
+        if split_k and split_k > 0:
+            k_rate = split_k
+    elif pitcher_hand == "R":
+        split_ops = batting.get("vs_rhp_ops")
+        split_k = batting.get("vs_rhp_k_rate")
+        if split_ops and split_ops > 0:
+            ops = split_ops
+        if split_k and split_k > 0:
+            k_rate = split_k
 
     score = (ops - 0.700) * 10 + (wrc - 100) / 20 - (k_rate - 22) / 10
     return score

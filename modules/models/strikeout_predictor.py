@@ -3,26 +3,27 @@ from modules.models.confidence import calc_k_confidence, grade_pick
 
 
 # Factor weights (sum to 1.0)
-W_CSW = 0.25
-W_SWSTR = 0.15
-W_K_RATE = 0.15
-W_OPP_K_RATE = 0.20
+W_CSW = 0.20
+W_SWSTR = 0.10
+W_K_RATE = 0.20
+W_OPP_K_RATE = 0.15
 W_PITCH_COUNT = 0.10
 W_RECENT_FORM = 0.10
 W_PARK_UMP = 0.05
+W_XFIP = 0.10  # New: xFIP-derived K expectation
 
 
 def predict_strikeouts(game, pitcher, opposing_batting, park, umpire, weather, k_prop_odds):
-    """Predict starting pitcher strikeout total using 7-factor weighted model."""
+    """Predict starting pitcher strikeout total using 8-factor weighted model."""
     reasons = []
 
     # --- Factor 1: CSW% (Called Strikes + Whiffs) ---
     csw = pitcher.get("csw")
-    csw_ks = _csw_to_expected_ks(csw) if csw else None
+    csw_ks = _csw_to_expected_ks(csw, _estimate_batters_faced(pitcher)) if csw else None
 
     # --- Factor 2: SwStr% ---
     swstr = pitcher.get("swstr")
-    swstr_ks = _swstr_to_expected_ks(swstr) if swstr else None
+    swstr_ks = _swstr_to_expected_ks(swstr, _estimate_batters_faced(pitcher)) if swstr else None
 
     # --- Factor 3: Season K% ---
     k_rate = pitcher.get("k_rate")
@@ -56,6 +57,10 @@ def predict_strikeouts(game, pitcher, opposing_batting, park, umpire, weather, k
     if umpire and umpire.get("k_plus"):
         ump_k_adjustment = umpire["k_plus"] * 0.1
 
+    # --- Factor 8: xFIP-derived K expectation ---
+    xfip = pitcher.get("xfip")
+    xfip_ks = _xfip_to_expected_ks(xfip, expected_batters) if xfip else None
+
     # --- Weighted combination ---
     components = []
     weights_used = []
@@ -79,6 +84,9 @@ def predict_strikeouts(game, pitcher, opposing_batting, park, umpire, weather, k
     if pitch_count_cap is not None:
         components.append(pitch_count_cap * W_PITCH_COUNT)
         weights_used.append(W_PITCH_COUNT)
+    if xfip_ks is not None:
+        components.append(xfip_ks * W_XFIP)
+        weights_used.append(W_XFIP)
 
     # Recent form
     base_ks = (season_ks or csw_ks or 6)
@@ -150,18 +158,41 @@ def predict_strikeouts(game, pitcher, opposing_batting, park, umpire, weather, k
     }
 
 
-def _csw_to_expected_ks(csw, avg_batters=24):
-    """Convert CSW% to expected strikeouts. ~30% CSW = 7 Ks per 24 batters."""
+def _csw_to_expected_ks(csw, batters_faced=24):
+    """Convert CSW% to expected strikeouts.
+
+    Calibration: league avg CSW ~29% with ~22% K rate over ~24 batters ≈ 5.3 Ks.
+    ~30% CSW ≈ ~23% K rate. CSW correlates with K rate at ~0.85.
+    Formula: Ks = (CSW/100) * batters * 0.78 (empirical K-per-CSW-contact ratio).
+    """
     if not csw:
         return None
-    return round(csw / 100 * avg_batters * 1.1, 1)
+    return round(csw / 100 * batters_faced * 0.78, 1)
 
 
-def _swstr_to_expected_ks(swstr, avg_batters=24):
-    """Convert SwStr% to expected Ks. ~12% SwStr = 7 Ks."""
+def _swstr_to_expected_ks(swstr, batters_faced=24):
+    """Convert SwStr% to expected Ks.
+
+    Calibration: league avg SwStr ~11.5% with ~22% K rate.
+    SwStr is a subset of total misses — roughly 1.9x multiplier to K rate.
+    Formula: Ks = (SwStr/100) * batters * 1.9.
+    """
     if not swstr:
         return None
-    return round(swstr / 100 * avg_batters * 2.4, 1)
+    return round(swstr / 100 * batters_faced * 1.9, 1)
+
+
+def _xfip_to_expected_ks(xfip, batters_faced=24):
+    """Derive expected Ks from xFIP.
+
+    xFIP normalizes HR/FB rate — lower xFIP correlates with higher K ability.
+    League avg xFIP ~4.10, avg K/9 ~8.5. Each 0.5 xFIP below avg ≈ +0.8 K/9.
+    """
+    if not xfip or xfip <= 0:
+        return None
+    k_per_9 = 8.5 + (4.10 - xfip) * 1.6
+    avg_innings = batters_faced / 4.3  # ~4.3 batters per inning
+    return round(max(1.0, k_per_9 * avg_innings / 9), 1)
 
 
 def _k_rate_to_expected_ks(k_rate, pitcher):

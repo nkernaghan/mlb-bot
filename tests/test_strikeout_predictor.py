@@ -5,13 +5,15 @@ from modules.models.strikeout_predictor import (
 
 
 def test_csw_to_expected_ks_elite():
+    # 32% CSW * 24 batters * 0.78 = ~6.0 Ks (calibrated: not every CSW → K)
     ks = _csw_to_expected_ks(32.0)
-    assert 7 < ks < 10
+    assert 5 < ks < 8
 
 
 def test_swstr_to_expected_ks():
+    # 13% SwStr * 24 batters * 1.9 = ~5.9 Ks (calibrated multiplier)
     ks = _swstr_to_expected_ks(13.0)
-    assert 6 < ks < 9
+    assert 5 < ks < 8
 
 
 def test_estimate_batters_faced():

@@ -1,4 +1,5 @@
 import statsapi
+import requests
 from modules.data.cache import get_pitcher_fg, get_pitcher_savant
 from modules.database import get_connection
 from config import SEASON_YEAR
@@ -24,20 +25,25 @@ def fetch_pitcher_stats(player_id, player_name, team=None):
         "team": team,
     }
 
-    # MLB Stats API — season stats
+    # MLB Stats API — season stats + pitcher handedness
     try:
         mlb_stats = statsapi.player_stat_data(player_id, group="pitching", type="season")
-        if mlb_stats and mlb_stats.get("stats"):
-            s = mlb_stats["stats"][0].get("stats", {})
-            stats["era"] = float(s.get("era", 0))
-            stats["k_per_9"] = float(s.get("strikeoutsPer9Inn", 0))
-            stats["whip"] = float(s.get("whip", 0))
-            stats["innings_pitched"] = _parse_innings(s.get("inningsPitched", "0"))
-            stats["games_started"] = int(s.get("gamesStarted", 0))
-            total_ks = int(s.get("strikeOuts", 0))
-            batters_faced = int(s.get("battersFaced", 1))
-            stats["k_rate"] = round(total_ks / batters_faced * 100, 1) if batters_faced else 0
-            stats["bb_rate"] = round(int(s.get("baseOnBalls", 0)) / batters_faced * 100, 1) if batters_faced else 0
+        if mlb_stats:
+            # Get throwing hand from player info
+            pitch_hand = mlb_stats.get("pitch_hand")
+            if pitch_hand:
+                stats["throws"] = pitch_hand
+            if mlb_stats.get("stats"):
+                s = mlb_stats["stats"][0].get("stats", {})
+                stats["era"] = float(s.get("era", 0))
+                stats["k_per_9"] = float(s.get("strikeoutsPer9Inn", 0))
+                stats["whip"] = float(s.get("whip", 0))
+                stats["innings_pitched"] = _parse_innings(s.get("inningsPitched", "0"))
+                stats["games_started"] = int(s.get("gamesStarted", 0))
+                total_ks = int(s.get("strikeOuts", 0))
+                batters_faced = int(s.get("battersFaced", 1))
+                stats["k_rate"] = round(total_ks / batters_faced * 100, 1) if batters_faced else 0
+                stats["bb_rate"] = round(int(s.get("baseOnBalls", 0)) / batters_faced * 100, 1) if batters_faced else 0
     except Exception as e:
         print(f"    WARNING: MLB API stats failed for {player_name}: {e}")
 
@@ -97,6 +103,32 @@ def fetch_pitcher_stats(player_id, player_name, team=None):
                 stats["recent_k_per_9"] = round(recent_ks / recent_ip * 9, 1) if recent_ip else 0
                 recent_er = sum(int(g.get("earnedRuns", 0)) for g in recent_starts)
                 stats["recent_era"] = round(recent_er / recent_ip * 9, 2) if recent_ip else 0
+    except Exception:
+        pass
+
+    # MLB API — first-inning splits (sitCodes=i01) for NRFI model
+    try:
+        resp = requests.get(
+            f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats",
+            params={"stats": "statSplits", "group": "pitching", "season": SEASON_YEAR, "sitCodes": "i01"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            for stat_group in data.get("stats", []):
+                for split in stat_group.get("splits", []):
+                    st = split.get("stat", {})
+                    ip_1st = _parse_innings(st.get("inningsPitched", "0"))
+                    er_1st = int(st.get("earnedRuns", 0))
+                    runs_1st = int(st.get("runs", 0))
+                    if ip_1st > 0:
+                        stats["first_inning_era"] = round(er_1st / ip_1st * 9, 2)
+                        # NRFI rate: percentage of first innings with 0 runs allowed
+                        # Total 1st innings ≈ IP (since each is 1 inning max)
+                        total_1st_innings = round(ip_1st)  # Each clean 1st = 1.0 IP
+                        scoreless_1st = total_1st_innings - runs_1st  # Approximate
+                        if total_1st_innings > 0:
+                            stats["nrfi_rate"] = round(max(0, scoreless_1st) / total_1st_innings * 100, 1)
     except Exception:
         pass
 

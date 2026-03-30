@@ -5,7 +5,9 @@ from modules.models.confidence import grade_pick
 def test_pitcher_quality_prefers_xera():
     pitcher = {"xera": 3.00, "fip": 3.50, "era": 4.00}
     score = _pitcher_quality_score(pitcher)
-    assert score == 3.00 * 0.6 + 3.50 * 0.4
+    # Ensemble: xERA (30%), FIP (25%), ERA (10%) — all present, xFIP/SIERA missing
+    expected = (3.00 * 0.30 + 3.50 * 0.25 + 4.00 * 0.10) / (0.30 + 0.25 + 0.10)
+    assert abs(score - expected) < 0.001
 
 
 def test_pitcher_quality_fallback_to_era():

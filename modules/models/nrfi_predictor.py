@@ -8,9 +8,9 @@ def predict_nrfi(game, home_pitcher, away_pitcher, home_batting_top,
     reasons = []
     risks = []
 
-    # --- Primary signal: FIP for both pitchers ---
-    home_fip = home_pitcher.get("fip") or home_pitcher.get("era") or 4.50
-    away_fip = away_pitcher.get("fip") or away_pitcher.get("era") or 4.50
+    # --- Primary signal: FIP/xFIP/SIERA ensemble for both pitchers ---
+    home_fip = _best_pitcher_metric(home_pitcher)
+    away_fip = _best_pitcher_metric(away_pitcher)
 
     home_scoreless_prob = _fip_to_scoreless_prob(home_fip)
     away_scoreless_prob = _fip_to_scoreless_prob(away_fip)
@@ -117,7 +117,8 @@ def predict_nrfi(game, home_pitcher, away_pitcher, home_batting_top,
 
     # --- Confidence ---
     data_flags = {
-        "both_fips_known": home_pitcher.get("fip") is not None and away_pitcher.get("fip") is not None,
+        "both_fips_known": (home_pitcher.get("fip") or home_pitcher.get("xfip") or home_pitcher.get("siera")) is not None and
+                          (away_pitcher.get("fip") or away_pitcher.get("xfip") or away_pitcher.get("siera")) is not None,
         "first_inning_era": home_1st_era is not None or away_1st_era is not None,
         "leadoff_data": bool(away_leadoff.get("ops")) or bool(home_leadoff.get("ops")),
         "umpire_known": umpire is not None,
@@ -152,6 +153,19 @@ def predict_nrfi(game, home_pitcher, away_pitcher, home_batting_top,
         "home_fip": home_fip,
         "away_fip": away_fip,
     }
+
+
+def _best_pitcher_metric(pitcher):
+    """Get best available pitcher quality metric for NRFI. Prefers FIP > xFIP > SIERA > ERA."""
+    fip = pitcher.get("fip")
+    xfip = pitcher.get("xfip")
+    siera = pitcher.get("siera")
+    era = pitcher.get("era")
+
+    available = [v for v in [fip, xfip, siera] if v and v > 0]
+    if available:
+        return sum(available) / len(available)  # Average of available advanced metrics
+    return era or 4.50
 
 
 def _fip_to_scoreless_prob(fip):

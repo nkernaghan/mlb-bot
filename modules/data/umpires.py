@@ -50,6 +50,21 @@ def get_umpire_from_boxscore(game_pk):
     return None
 
 
+def get_umpire_from_feed(game_pk):
+    """Get home plate umpire name from the live game feed (works for scheduled games too)."""
+    import statsapi
+    try:
+        data = statsapi.get("game", {"gamePk": game_pk})
+        officials = data.get("liveData", {}).get("boxscore", {}).get("officials", [])
+        for official in officials:
+            if official.get("officialType") == "Home Plate":
+                person = official.get("official", {})
+                return person.get("fullName")
+    except Exception:
+        pass
+    return None
+
+
 def save_umpire_stats(umpire_id, stats):
     """Save umpire stats to database."""
     conn = get_connection()

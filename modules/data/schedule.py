@@ -136,6 +136,70 @@ def fetch_lineups(game_pk):
         return None
 
 
+def fetch_rest_travel(games, target_date):
+    """Detect rest days and travel for each team by checking yesterday's games.
+
+    Returns dict: team_id -> {"days_off": 0/1, "traveled": bool, "venue_yesterday": str}
+    """
+    from datetime import datetime, timedelta
+    try:
+        yesterday = (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return {}
+
+    # Fetch yesterday's schedule
+    yesterday_games = {}
+    try:
+        raw = statsapi.schedule(date=yesterday, sportId=1)
+        entries = raw if isinstance(raw, list) else []
+        if isinstance(raw, dict):
+            for de in raw.get("dates", []):
+                entries.extend(de.get("games", []))
+
+        for entry in entries:
+            if isinstance(entry, dict):
+                # Handle both parsed and raw formats
+                for team_key, venue_key in [
+                    ("home_id", "venue_name"), ("away_id", "venue_name"),
+                    ("home_team_id", "venue_name"),
+                ]:
+                    pass
+
+        # Simpler: use statsapi.schedule parsed format
+        if isinstance(raw, list):
+            for g in raw:
+                home_id = g.get("home_id")
+                away_id = g.get("away_id")
+                venue = g.get("venue_name", "")
+                if home_id:
+                    yesterday_games[home_id] = venue
+                if away_id:
+                    yesterday_games[away_id] = venue
+    except Exception:
+        return {}
+
+    # Compare today vs yesterday for each team
+    rest_info = {}
+    for game in games:
+        for side in ["home", "away"]:
+            tid = game.get(f"{side}_team_id")
+            if not tid:
+                continue
+            today_venue = game.get("venue_name", "")
+            if tid in yesterday_games:
+                yest_venue = yesterday_games[tid]
+                traveled = yest_venue != today_venue and yest_venue != ""
+                rest_info[tid] = {
+                    "days_off": 0,
+                    "traveled": traveled,
+                    "venue_yesterday": yest_venue,
+                }
+            else:
+                rest_info[tid] = {"days_off": 1, "traveled": False, "venue_yesterday": None}
+
+    return rest_info
+
+
 def save_games(games):
     """Save games to the database."""
     conn = get_connection()

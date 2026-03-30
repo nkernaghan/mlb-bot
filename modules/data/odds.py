@@ -137,7 +137,58 @@ def get_consensus_odds(all_bookmaker_odds):
     spread_values = [o["run_line_spread"] for o in all_bookmaker_odds if o.get("run_line_spread") is not None]
     consensus["run_line_spread"] = spread_values[0] if spread_values else None
 
+    # Run line prices for consensus
+    for field in ["run_line_home_price", "run_line_away_price"]:
+        values = [o[field] for o in all_bookmaker_odds if o.get(field) is not None]
+        consensus[field] = round(sum(values) / len(values)) if values else None
+
+    # Detect sharp/casual book divergence (reverse line movement signal)
+    rlm = detect_line_divergence(all_bookmaker_odds)
+    if rlm:
+        consensus["rlm_signal"] = rlm
+
     return consensus
+
+
+def detect_line_divergence(all_bookmaker_odds):
+    """Detect reverse line movement by comparing sharp vs casual book implied probabilities.
+
+    Sharp books (DraftKings, FanDuel, BetOnline) have tighter lines.
+    If sharp books favor one side more than casual books, that's a signal.
+    """
+    from config import SHARP_BOOKS, CASUAL_BOOKS
+
+    sharp_home = []
+    casual_home = []
+
+    for odds in all_bookmaker_odds:
+        bk = odds.get("bookmaker", "").lower()
+        home_ml = odds.get("home_ml")
+        if home_ml is None:
+            continue
+
+        implied = american_to_implied(home_ml)
+        if bk in SHARP_BOOKS:
+            sharp_home.append(implied)
+        elif bk in CASUAL_BOOKS:
+            casual_home.append(implied)
+
+    if not sharp_home or not casual_home:
+        return None
+
+    sharp_avg = sum(sharp_home) / len(sharp_home)
+    casual_avg = sum(casual_home) / len(casual_home)
+    divergence = round((sharp_avg - casual_avg) * 100, 1)  # percentage points
+
+    # Meaningful divergence: sharp books see >2% more value on one side
+    if abs(divergence) > 2.0:
+        return {
+            "sharp_home_implied": round(sharp_avg, 3),
+            "casual_home_implied": round(casual_avg, 3),
+            "divergence": divergence,  # Positive = sharp money on home
+            "direction": "home" if divergence > 0 else "away",
+        }
+    return None
 
 
 def save_odds(game_pk, odds_list):
