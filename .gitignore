@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+data/mlb.db
+data/odds_history/
+logs/
+reports/
+.DS_Store
+venv/
+last30days-skill/
