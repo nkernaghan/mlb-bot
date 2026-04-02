@@ -15,10 +15,28 @@ def grade_results(date_str):
         print(f"No predictions found for {date_str}")
         return []
 
-    results = []
+    # Deduplicate: keep the best grade (BET > LEAN > PASS) per unique pick
+    best_preds = {}
+    grade_rank = {"BET": 3, "LEAN": 2, "PASS": 1, "": 0}
     for pred in predictions:
         game_pk = pred["game_pk"]
         bet_type = pred["bet_type"]
+        grade = pred["grade"] or ""
+        pitcher = pred["pitcher_name"] if pred["pitcher_name"] else ""
+        key = f"{game_pk}_{bet_type}_{pred['pick']}_{pitcher}"
+        rank = grade_rank.get(grade, 0)
+        if key not in best_preds or rank > grade_rank.get(best_preds[key]["grade"] or "", 0):
+            best_preds[key] = pred
+
+    results = []
+    for pred in best_preds.values():
+        game_pk = pred["game_pk"]
+        bet_type = pred["bet_type"]
+        grade = pred["grade"] or ""
+
+        # Skip PASS picks — they're not actionable bets
+        if grade == "PASS" or pred["pick"] == "PASS":
+            continue
 
         try:
             if bet_type == "game":
@@ -41,8 +59,32 @@ def grade_results(date_str):
     return results
 
 
+_game_status_cache = {}
+
+def _is_game_final(game_pk):
+    """Return True only if the game status is Final."""
+    if game_pk in _game_status_cache:
+        return _game_status_cache[game_pk]
+    try:
+        data = statsapi.get("game", {"gamePk": game_pk})
+        status = (
+            data.get("gameData", {})
+                .get("status", {})
+                .get("abstractGameState", "")
+        )
+        result = status == "Final"
+        _game_status_cache[game_pk] = result
+        return result
+    except Exception:
+        _game_status_cache[game_pk] = False
+        return False
+
+
 def _grade_game_pick(game_pk, pred):
     """Grade a game prediction against the final score."""
+    if not _is_game_final(game_pk):
+        return None
+
     boxscore = statsapi.boxscore_data(game_pk)
     if not boxscore:
         return None
@@ -58,7 +100,28 @@ def _grade_game_pick(game_pk, pred):
     away_name = boxscore.get("teamInfo", {}).get("away", {}).get("teamName", "")
 
     actual_winner = home_name if home_score > away_score else away_name
-    result = "WIN" if winner in actual_winner or actual_winner in winner else "LOSS"
+
+    # Flexible name matching — handle cases like "D-backs" vs "Arizona Diamondbacks"
+    def names_match(pick, actual):
+        if not pick or not actual:
+            return False
+        p = pick.lower().replace("-", "").replace("'", "")
+        a = actual.lower().replace("-", "").replace("'", "")
+        if p in a or a in p:
+            return True
+        # Check last word (e.g. "Diamondbacks" vs "D-backs" won't match, but city might)
+        pick_words = p.split()
+        actual_words = a.split()
+        # Check if any word from actual appears in pick or vice versa
+        for w in actual_words:
+            if len(w) >= 4 and w in p:
+                return True
+        for w in pick_words:
+            if len(w) >= 4 and w in a:
+                return True
+        return False
+
+    result = "WIN" if names_match(winner, actual_winner) else "LOSS"
 
     return {
         "game_pk": game_pk,
@@ -68,28 +131,55 @@ def _grade_game_pick(game_pk, pred):
         "actual_outcome": f"{away_name} {away_score} - {home_name} {home_score}",
         "edge_at_pick": pred["edge"],
         "confidence_at_pick": pred["confidence"],
+        "grade": pred["grade"] or "",
     }
 
 
 def _grade_k_pick(game_pk, pred):
     """Grade a K prop against actual starter strikeouts."""
+    if not _is_game_final(game_pk):
+        return None
+
     boxscore = statsapi.boxscore_data(game_pk)
     if not boxscore:
         return None
 
-    pick = pred["pick"]
+    # Get the pitcher name from the prediction
+    target_pitcher = (pred["pitcher_name"] if pred["pitcher_name"] else "") or ""
+
+    # Find the matching pitcher in the boxscore
+    # Note: index 0 is the header row, index 1 is the actual starter
     actual_ks = None
+    matched_name = ""
     for side in ["away", "home"]:
         pitchers = boxscore.get(f"{side}Pitchers", [])
-        if pitchers:
-            starter = pitchers[0] if pitchers else {}
-            actual_ks = int(starter.get("k", 0))
-            break
+        if len(pitchers) < 2:
+            continue
+        starter = pitchers[1]  # index 0 is header
+        starter_name = starter.get("name", "")
+
+        if target_pitcher:
+            # Match by name
+            if (target_pitcher in starter_name or starter_name in target_pitcher or
+                target_pitcher.split()[-1] in starter_name):
+                try:
+                    actual_ks = int(starter.get("k", 0))
+                except (ValueError, TypeError):
+                    continue
+                matched_name = starter_name
+                break
+        else:
+            # No pitcher name stored — skip this prediction
+            return None
 
     if actual_ks is None:
         return None
 
-    line = pred.get("model_value")
+    pick = pred["pick"]
+    line = pred["market_value"]
+    if line is None or line == 0:
+        return None
+
     if pick == "OVER":
         result = "WIN" if actual_ks > line else "LOSS" if actual_ks < line else "PUSH"
     else:
@@ -100,14 +190,17 @@ def _grade_k_pick(game_pk, pred):
         "bet_type": "strikeout",
         "pick": pred["pick"],
         "result": result,
-        "actual_outcome": f"{actual_ks} Ks",
+        "actual_outcome": f"{matched_name}: {actual_ks} Ks (line {line})",
         "edge_at_pick": pred["edge"],
         "confidence_at_pick": pred["confidence"],
+        "grade": pred["grade"] or "",
     }
 
 
 def _grade_nrfi_pick(game_pk, pred):
     """Grade NRFI pick against first-inning scoring."""
+    if not _is_game_final(game_pk):
+        return None
     try:
         data = statsapi.get("game_linescore", {"gamePk": game_pk})
         innings = data.get("innings", [])
@@ -135,6 +228,7 @@ def _grade_nrfi_pick(game_pk, pred):
             "actual_outcome": f"1st inning: {away_runs}-{home_runs} ({'NRFI' if actual_nrfi else 'YRFI'})",
             "edge_at_pick": pred["edge"],
             "confidence_at_pick": pred["confidence"],
+            "grade": pred["grade"] or "",
         }
     except Exception:
         return None
@@ -142,13 +236,20 @@ def _grade_nrfi_pick(game_pk, pred):
 
 def _save_result(result):
     conn = get_connection()
+    existing = conn.execute(
+        "SELECT id FROM results WHERE game_pk = ? AND bet_type = ? AND pick = ? AND actual_outcome = ? LIMIT 1",
+        (result["game_pk"], result["bet_type"], result["pick"], result["actual_outcome"])
+    ).fetchone()
+    if existing:
+        conn.close()
+        return
     conn.execute("""
         INSERT INTO results (game_pk, bet_type, pick, result, actual_outcome,
-            edge_at_pick, confidence_at_pick, graded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            edge_at_pick, confidence_at_pick, grade, graded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (result["game_pk"], result["bet_type"], result["pick"], result["result"],
           result["actual_outcome"], result["edge_at_pick"], result["confidence_at_pick"],
-          datetime.utcnow().isoformat()))
+          result.get("grade", ""), datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
 

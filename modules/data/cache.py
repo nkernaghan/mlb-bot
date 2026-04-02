@@ -1,4 +1,6 @@
 import pandas as pd
+import requests as _requests
+import io
 from datetime import datetime, date
 from pybaseball import pitching_stats, batting_stats
 from pybaseball import statcast_pitcher_expected_stats
@@ -8,6 +10,7 @@ from config import SEASON_YEAR
 
 _pitcher_fg_cache = None
 _pitcher_savant_cache = None
+_pitcher_savant_pitch_cache = None   # Savant custom leaderboard: SwStr%, F-Strike%, CSW%, K%, BB%
 _batter_fg_cache = None
 _batter_savant_cache = None
 _cache_date = None
@@ -111,12 +114,15 @@ def _blend_fg_rows(rows):
     for col in blend_cols:
         cur_val = cur.get(col)
         prv_val = prv.get(col)
-        if cur_val is not None and prv_val is not None:
+        # Treat NaN as missing
+        cur_ok = cur_val is not None and not (isinstance(cur_val, float) and pd.isna(cur_val))
+        prv_ok = prv_val is not None and not (isinstance(prv_val, float) and pd.isna(prv_val))
+        if cur_ok and prv_ok:
             try:
                 result[col] = float(cur_val) * cur_weight + float(prv_val) * prv_weight
             except (ValueError, TypeError):
                 pass
-        elif prv_val is not None and cur_val is None:
+        elif prv_ok and not cur_ok:
             result[col] = prv_val
 
     return result
@@ -142,32 +148,97 @@ def _blend_savant_rows(rows):
     cur_pa = float(cur.get("pa", 0) or cur.get("bip", 0) or 0)
     prv_pa = float(prv.get("pa", 0) or prv.get("bip", 0) or 0)
 
-    if cur_pa >= 150 or prv_pa == 0:
-        return cur.to_dict()
-
-    cur_weight = max(0.50, min(1.0, cur_pa / 150))
+    # When PA data is missing (e.g. Savant custom leaderboard), use early-season
+    # default weighting: 50% current, 50% prior.  This is better than returning
+    # only the current-year small sample.
+    no_pa_data = cur_pa == 0 and prv_pa == 0
+    if not no_pa_data:
+        if cur_pa >= 150 or prv_pa == 0:
+            return cur.to_dict()
+        cur_weight = max(0.50, min(1.0, cur_pa / 150))
+    else:
+        cur_weight = 0.50
     prv_weight = 1.0 - cur_weight
 
     result = cur.to_dict()
     blend_cols = ["xera", "xba", "xslg", "xwoba", "xobp", "xiso",
-                  "barrel_batted_rate", "k_percent", "bb_percent"]
+                  "barrel_batted_rate", "k_percent", "bb_percent",
+                  "whiff_percent", "f_strike_percent", "csw_rate"]
     for col in blend_cols:
         cur_val = cur.get(col)
         prv_val = prv.get(col)
-        if cur_val is not None and prv_val is not None:
+        # Treat NaN as missing
+        cur_ok = cur_val is not None and not (isinstance(cur_val, float) and pd.isna(cur_val))
+        prv_ok = prv_val is not None and not (isinstance(prv_val, float) and pd.isna(prv_val))
+        if cur_ok and prv_ok:
             try:
                 result[col] = float(cur_val) * cur_weight + float(prv_val) * prv_weight
             except (ValueError, TypeError):
                 pass
-        elif prv_val is not None and cur_val is None:
+        elif prv_ok and not cur_ok:
             result[col] = prv_val
 
     return result
 
 
+def _fetch_savant_custom(year, player_type="pitcher", min_pa=1):
+    """Fetch Savant custom leaderboard with pitch-level stats (SwStr%, F-Strike%, CSW%, K%, BB%)."""
+    selections = "k_percent,bb_percent,whiff_percent,f_strike_percent,csw_rate"
+    r = _requests.get(
+        "https://baseballsavant.mlb.com/leaderboard/custom",
+        params={
+            "year": year, "type": player_type, "min": min_pa,
+            "selections": selections,
+            "chart": "false", "csv": "true",
+        },
+        headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"},
+        timeout=20,
+    )
+    r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+    return df
+
+
+def _fetch_savant_custom_with_fallback(label, year, player_type="pitcher", min_pa=1):
+    """Fetch current + previous year Savant custom leaderboard."""
+    current_df = pd.DataFrame()
+    prev_df = pd.DataFrame()
+
+    try:
+        current_df = _fetch_savant_custom(year, player_type, min_pa)
+        print(f"  {year} {label}: {len(current_df)} entries")
+    except Exception:
+        print(f"  {year} {label}: no data available")
+
+    prev_year = year - 1
+    try:
+        prev_df = _fetch_savant_custom(prev_year, player_type, min_pa)
+        print(f"  {prev_year} {label}: {len(prev_df)} entries")
+    except Exception:
+        print(f"  {prev_year} {label}: no data available")
+
+    if not current_df.empty and not prev_df.empty:
+        current_df = current_df.copy()
+        prev_df = prev_df.copy()
+        current_df["_source_year"] = year
+        prev_df["_source_year"] = prev_year
+        merged = pd.concat([current_df, prev_df], ignore_index=True)
+        return merged, f"{year}+{prev_year}"
+    elif not current_df.empty:
+        current_df = current_df.copy()
+        current_df["_source_year"] = year
+        return current_df, year
+    elif not prev_df.empty:
+        prev_df = prev_df.copy()
+        prev_df["_source_year"] = prev_year
+        return prev_df, prev_year
+    return pd.DataFrame(), None
+
+
 def refresh_daily_caches(target_date=None, force=False):
     """Fetch FanGraphs and Savant leaderboards once per day."""
-    global _pitcher_fg_cache, _pitcher_savant_cache, _batter_fg_cache, _batter_savant_cache, _cache_date
+    global _pitcher_fg_cache, _pitcher_savant_cache, _pitcher_savant_pitch_cache
+    global _batter_fg_cache, _batter_savant_cache, _cache_date
 
     today = target_date or date.today().isoformat()
     if _cache_date == today and not force:
@@ -183,6 +254,12 @@ def refresh_daily_caches(target_date=None, force=False):
         statcast_pitcher_expected_stats, "Savant pitchers", SEASON_YEAR, minPA=50, use_qual=False)
     if yr:
         print(f"  Using {yr} Savant pitcher data ({len(_pitcher_savant_cache)} pitchers)")
+
+    print("  Fetching Savant pitch-level stats (SwStr%, F-Strike%, CSW%)...")
+    _pitcher_savant_pitch_cache, yr = _fetch_savant_custom_with_fallback(
+        "Savant pitch stats", SEASON_YEAR, "pitcher", min_pa=1)
+    if yr:
+        print(f"  Using {yr} Savant pitch data ({len(_pitcher_savant_pitch_cache)} pitchers)")
 
     print("  Fetching FanGraphs batter leaderboard...")
     _batter_fg_cache, yr = _fetch_with_fallback(batting_stats, "FG batters", SEASON_YEAR, qual=1)
@@ -287,6 +364,17 @@ def get_pitcher_savant(player_id):
     if _pitcher_savant_cache is None or _pitcher_savant_cache.empty:
         return None
     df = _pitcher_savant_cache
+    matches = df[df["player_id"] == player_id]
+    if matches.empty:
+        return None
+    return _blend_savant_rows(matches)
+
+
+def get_pitcher_savant_pitch(player_id):
+    """Lookup a pitcher in the Savant pitch-level cache (SwStr%, F-Strike%, CSW%, K%, BB%)."""
+    if _pitcher_savant_pitch_cache is None or _pitcher_savant_pitch_cache.empty:
+        return None
+    df = _pitcher_savant_pitch_cache
     matches = df[df["player_id"] == player_id]
     if matches.empty:
         return None

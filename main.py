@@ -21,6 +21,8 @@ from modules.models.nrfi_predictor import predict_nrfi
 from modules.models.confidence import grade_pick
 from modules.output.reporting import generate_report
 from modules.output.results_tracker import grade_results, show_record
+from modules.pocketbase_sync import sync_to_pocketbase
+from modules.export_static import export_all as export_static_site
 
 
 def parse_args():
@@ -114,15 +116,39 @@ def analyze_game(game, odds_by_event, injuries_cache, bullpen_usage_cache, rest_
 
         # K prop predictions (for both starters)
         if run_k:
-            for pitcher, opp_batting, side in [
-                (home_pitcher, away_batting, "home"),
-                (away_pitcher, home_batting, "away"),
+            # Pre-fetch top-3 batter K-rates for each side so the K model can use
+            # individual lineup K-rates rather than just the team average.
+            # Lineups may not be posted yet — fetch_lineups returns None gracefully.
+            home_top_k_rates: list[float] = []
+            away_top_k_rates: list[float] = []
+            try:
+                k_lineups = fetch_lineups(game_pk)
+                if k_lineups:
+                    for batter in (k_lineups.get("home") or [])[:3]:
+                        bs = fetch_batter_stats(batter["id"], batter["name"], game.get("home_team_name"))
+                        if bs.get("k_rate"):
+                            home_top_k_rates.append(bs["k_rate"])
+                    for batter in (k_lineups.get("away") or [])[:3]:
+                        bs = fetch_batter_stats(batter["id"], batter["name"], game.get("away_team_name"))
+                        if bs.get("k_rate"):
+                            away_top_k_rates.append(bs["k_rate"])
+            except Exception:
+                pass  # lineups not yet available — model falls back to team average
+
+            for pitcher, opp_batting, opp_top_k_rates, side in [
+                (home_pitcher, away_batting, away_top_k_rates, "home"),
+                (away_pitcher, home_batting, home_top_k_rates, "away"),
             ]:
                 if not pitcher.get("player_id"):
                     continue
                 k_odds = game_odds.get("k_props", {}).get(pitcher.get("player_name"))
+                bb_rate = pitcher.get("bb_rate")
                 try:
-                    pred = predict_strikeouts(game, pitcher, opp_batting, park, umpire, weather, k_odds)
+                    pred = predict_strikeouts(
+                        game, pitcher, opp_batting, park, umpire, weather, k_odds,
+                        opp_batter_k_rates=opp_top_k_rates or None,
+                        pitcher_bb_rate=bb_rate,
+                    )
                     predictions.append(pred)
                 except Exception as e:
                     print(f"    K prediction error for {pitcher.get('player_name')}: {e}")
@@ -159,18 +185,29 @@ def analyze_game(game, odds_by_event, injuries_cache, bullpen_usage_cache, rest_
 
 
 def save_predictions(predictions):
-    """Save all predictions to the database."""
+    """Save all predictions to the database. Clears old predictions for the same games first."""
     conn = get_connection()
     now = datetime.utcnow().isoformat()
+
+    # Clear ALL old predictions for these games to prevent duplicates from re-runs
+    game_pks = list(set(p["game_pk"] for p in predictions))
+    if game_pks:
+        placeholders = ",".join("?" * len(game_pks))
+        deleted = conn.execute(f"DELETE FROM predictions WHERE game_pk IN ({placeholders})", game_pks).rowcount
+        conn.commit()
+        if deleted:
+            print(f"  Cleared {deleted} old predictions for re-run")
+
     for pred in predictions:
         reasons = ", ".join(pred.get("reasons", []))
         risks = ", ".join(pred.get("risks", []))
         conn.execute("""
-            INSERT INTO predictions (game_pk, bet_type, pick, pick_detail, confidence, edge,
+            INSERT INTO predictions (game_pk, bet_type, pick, pick_detail, pitcher_name, confidence, edge,
                 model_value, market_value, grade, reasons, risks, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             pred["game_pk"], pred["bet_type"], pred["pick"], pred.get("pick_detail"),
+            pred.get("pitcher_name"),
             pred.get("confidence", 0), pred.get("edge", 0),
             pred.get("model_value") or pred.get("model_ks") or pred.get("nrfi_probability"),
             pred.get("market_value") or pred.get("line") or pred.get("implied_probability"),
@@ -204,7 +241,7 @@ def main():
     print("=" * 60)
 
     # Step 1: Fetch schedule
-    print("\n[1/6] Fetching schedule...")
+    print("\n[1/8] Fetching schedule...")
     games = fetch_games(target_date)
     if not games:
         print("  No games found for this date.")
@@ -213,7 +250,7 @@ def main():
     save_games(games)
 
     # Step 2: Fetch odds
-    print("[2/6] Fetching odds...")
+    print("[2/8] Fetching odds...")
     odds_by_event = {}
     try:
         raw_odds = fetch_game_odds()
@@ -277,7 +314,7 @@ def main():
         print(f"  Odds fetch error (continuing without): {e}")
 
     # Step 3: Fetch stats (cached daily)
-    print("[3/6] Fetching stats...")
+    print("[3/8] Fetching stats...")
     try:
         refresh_daily_caches(target_date, force=args.refresh)
     except Exception as e:
@@ -339,7 +376,7 @@ def main():
         print(f"  Injuries fetch error (continuing without): {e}")
 
     # Step 4: Run predictions
-    print("[4/6] Running predictions...")
+    print("[4/8] Running predictions...")
     all_predictions = []
 
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -366,14 +403,14 @@ def main():
                 print(f"  Error analyzing {game.get('home_team_name', '?')}: {e}")
 
     # Step 5: Generate report
-    print("[5/6] Generating report...")
+    print("[5/8] Generating report...")
     if all_predictions:
         generate_report(games, all_predictions, target_date)
     else:
         print("  No predictions generated.")
 
     # Step 6: Save to database
-    print("[6/6] Saving predictions...")
+    print("[6/8] Saving predictions...")
     if all_predictions:
         save_predictions(all_predictions)
         print(f"  Saved {len(all_predictions)} predictions to database")
@@ -381,6 +418,20 @@ def main():
     bets = sum(1 for p in all_predictions if p["grade"] == "BET")
     leans = sum(1 for p in all_predictions if p["grade"] == "LEAN")
     print(f"\nDone. {len(all_predictions)} total predictions: {bets} BET, {leans} LEAN")
+
+    # Sync to PocketBase (local dashboard)
+    print("\n[7/8] Syncing to PocketBase...")
+    try:
+        sync_to_pocketbase(target_date=target_date)
+    except Exception as e:
+        print(f"  PocketBase sync error: {e}")
+
+    # Export static JSON for GitHub Pages
+    print("[8/8] Exporting static site data...")
+    try:
+        export_static_site()
+    except Exception as e:
+        print(f"  Static export error: {e}")
 
 
 if __name__ == "__main__":

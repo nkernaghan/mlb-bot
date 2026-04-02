@@ -1,9 +1,15 @@
 import statsapi
 import requests
-from modules.data.cache import get_pitcher_fg, get_pitcher_savant
+import pandas as pd
+from modules.data.cache import get_pitcher_fg, get_pitcher_savant, get_pitcher_savant_pitch
 from modules.database import get_connection
-from config import SEASON_YEAR
+from config import SEASON_YEAR, LEAGUE_AVG_FIP
 from datetime import date
+
+
+# FIP constant: league-average ERA minus league-average FIP components.
+# Typical range 3.10-3.20. Updated each season alongside LEAGUE_AVG_FIP.
+_FIP_CONSTANT = 3.15
 
 
 def _parse_innings(ip_str):
@@ -44,6 +50,11 @@ def fetch_pitcher_stats(player_id, player_name, team=None):
                 batters_faced = int(s.get("battersFaced", 1))
                 stats["k_rate"] = round(total_ks / batters_faced * 100, 1) if batters_faced else 0
                 stats["bb_rate"] = round(int(s.get("baseOnBalls", 0)) / batters_faced * 100, 1) if batters_faced else 0
+                # Store counting stats for FIP calculation
+                stats["_hr"] = int(s.get("homeRuns", 0))
+                stats["_bb"] = int(s.get("baseOnBalls", 0))
+                stats["_hbp"] = int(s.get("hitBatsmen", 0))
+                stats["_so"] = total_ks
     except Exception as e:
         print(f"    WARNING: MLB API stats failed for {player_name}: {e}")
 
@@ -89,6 +100,42 @@ def fetch_pitcher_stats(player_id, player_name, team=None):
             if k_pct is not None:
                 stats["k_rate"] = round(k_pct * 100, 1) if k_pct < 1 else k_pct
 
+    # Savant pitch-level stats — SwStr%, F-Strike%, CSW%, K%, BB%
+    # Used as fallback when FanGraphs is unavailable (403 blocked)
+    savant_pitch = get_pitcher_savant_pitch(player_id)
+    if savant_pitch:
+        if not stats.get("swstr"):
+            whiff = savant_pitch.get("whiff_percent")
+            if whiff is not None:
+                stats["swstr"] = round(float(whiff), 1)
+        if not stats.get("f_strike_pct"):
+            fstrike = savant_pitch.get("f_strike_percent")
+            if fstrike is not None:
+                stats["f_strike_pct"] = round(float(fstrike), 1)
+        if not stats.get("csw"):
+            csw_val = savant_pitch.get("csw_rate")
+            if csw_val is not None and not pd.isna(csw_val):
+                stats["csw"] = round(float(csw_val), 1)
+        if not stats.get("k_rate"):
+            k_pct = savant_pitch.get("k_percent")
+            if k_pct is not None:
+                stats["k_rate"] = round(float(k_pct), 1)
+        if not stats.get("bb_rate"):
+            bb_pct = savant_pitch.get("bb_percent")
+            if bb_pct is not None:
+                stats["bb_rate"] = round(float(bb_pct), 1)
+
+    # Calculate FIP from MLB API data when FanGraphs is unavailable.
+    # Require minimum 10 IP — below that, FIP is pure noise (a single HR
+    # swings FIP by ~3 points over 4 IP).
+    ip = stats.get("innings_pitched") or 0
+    if not stats.get("fip") and ip >= 10:
+        stats["fip"] = _calc_fip(stats)
+
+    # Use xERA as xFIP proxy when FanGraphs xFIP is unavailable
+    if not stats.get("xfip") and stats.get("xera"):
+        stats["xfip"] = stats["xera"]
+
     # MLB API — game log for recent form + first-inning stats
     try:
         game_log = statsapi.player_stat_data(player_id, group="pitching", type="gameLog")
@@ -133,6 +180,19 @@ def fetch_pitcher_stats(player_id, player_name, team=None):
         pass
 
     return stats
+
+
+def _calc_fip(stats):
+    """Calculate FIP from MLB API counting stats: (13*HR + 3*(BB+HBP) - 2*K) / IP + constant."""
+    ip = stats.get("innings_pitched", 0)
+    if not ip or ip <= 0:
+        return None
+    hr = stats.get("_hr", 0)
+    bb = stats.get("_bb", 0)
+    hbp = stats.get("_hbp", 0)
+    so = stats.get("_so", 0)
+    fip = (13 * hr + 3 * (bb + hbp) - 2 * so) / ip + _FIP_CONSTANT
+    return round(fip, 2)
 
 
 def save_pitcher_stats(stats):

@@ -165,6 +165,7 @@ def init_db():
             bet_type TEXT NOT NULL,
             pick TEXT NOT NULL,
             pick_detail TEXT,
+            pitcher_name TEXT,
             confidence INTEGER,
             edge REAL,
             model_value REAL,
@@ -185,6 +186,7 @@ def init_db():
             actual_outcome TEXT,
             edge_at_pick REAL,
             confidence_at_pick INTEGER,
+            grade TEXT,
             graded_at TEXT,
             FOREIGN KEY (game_pk) REFERENCES games(game_pk)
         );
@@ -198,6 +200,16 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_pitcher_cache ON pitcher_stats_cache(player_id, date_cached);
         CREATE INDEX IF NOT EXISTS idx_batter_cache ON batter_stats_cache(player_id, date_cached);
     """)
+
+    # Migrations: add columns that may be missing from older databases
+    for table, column, col_type in [
+        ("predictions", "pitcher_name", "TEXT"),
+        ("results", "grade", "TEXT"),
+    ]:
+        try:
+            cursor.execute(f"SELECT {column} FROM {table} LIMIT 0")
+        except sqlite3.OperationalError:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
     conn.commit()
     conn.close()

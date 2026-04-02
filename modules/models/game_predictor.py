@@ -50,9 +50,11 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
 
     home_barrel_matchup = away_barrel - home_barrel_against
     away_barrel_matchup = home_barrel - away_barrel_against
+    # Positive barrel_edge = away team has more barrel upside → hurts home team
+    barrel_edge = (away_barrel_matchup - home_barrel_matchup) / 100
 
     if home_barrel_matchup > 3 or away_barrel_matchup > 3:
-        risks.append("Elevated barrel rate matchup — potential blowout risk")
+        risks.append("Elevated barrel rate matchup — potential blowup risk")
 
     # --- Signal 4: Bullpen (ERA + WHIP composite) ---
     bp_home_era = bullpen_home.get("bullpen_era", 4.0) or 4.0
@@ -144,11 +146,12 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
         pitcher_run_diff +
         lineup_run_diff +
         bp_run_diff +
+        barrel_edge * 0.15 +        # barrel matchup (small but real HR/XBH signal)
         home_adj +
         recent_form_adj +
         travel_adj +
-        park_adjustment * 0.1 +
-        weather_adj * 0.1
+        park_adjustment * 0.08 +     # park: persistent but partially baked into pitcher ERA
+        weather_adj * 0.05           # weather: noisy, smallest environment factor
     )
 
     # --- Signal 11: Vegas blending ---
@@ -191,6 +194,7 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
     pick_prob = blended_home_prob if pick_home else (1 - blended_home_prob)
 
     edge = 0
+    market_prob = None
     if market_implied_home is not None:
         market_prob = market_implied_home if pick_home else (1 - market_implied_home)
         edge = round((pick_prob - market_prob) * 100, 1)
@@ -263,7 +267,7 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
         "confidence": confidence,
         "edge": edge,
         "model_value": round(pick_prob * 100, 1),
-        "market_value": round((market_prob if market_implied_home else pick_prob) * 100, 1),
+        "market_value": round((market_prob if market_implied_home is not None else pick_prob) * 100, 1),
         "grade": grade,
         "reasons": reasons[:5],
         "risks": risks[:3],
