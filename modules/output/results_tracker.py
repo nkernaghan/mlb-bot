@@ -89,8 +89,8 @@ def _grade_game_pick(game_pk, pred):
     if not boxscore:
         return None
 
-    away_score = boxscore.get("awayBattingTotals", {}).get("r", 0)
-    home_score = boxscore.get("homeBattingTotals", {}).get("r", 0)
+    away_score = int(boxscore.get("awayBattingTotals", {}).get("r", 0))
+    home_score = int(boxscore.get("homeBattingTotals", {}).get("r", 0))
 
     if away_score == home_score:
         return None
