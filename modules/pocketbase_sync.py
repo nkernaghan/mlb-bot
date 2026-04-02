@@ -185,13 +185,23 @@ def sync_to_pocketbase(db_path="data/mlb.db", target_date=None):
                         elif pick_lower and (pick_lower in away_lower or away_lower in pick_lower):
                             pick_ml = odds_row["away_ml"]
 
-            # Unit sizing — favorites use edge tiers, underdogs capped
+            # Unit sizing — underdogs capped, favorites use edge tiers
+            # Games before 2026-04-02 use legacy edge-only tiers;
+            # 2026-04-02+ require edge + confidence to exceed 1u
+            use_new_sizing = game_date >= "2026-04-02"
             units = 0
             if grade == "BET":
                 if pick_ml is not None and pick_ml >= 150:
                     units = 0.5  # Big underdog
                 elif pick_ml is not None and pick_ml >= 100:
                     units = 1  # Small underdog
+                elif use_new_sizing:
+                    if edge >= 5 and conf >= 70:
+                        units = 2
+                    elif edge >= 3 and conf >= 65:
+                        units = 1.5
+                    else:
+                        units = 1
                 else:
                     if edge >= 5:
                         units = 2
