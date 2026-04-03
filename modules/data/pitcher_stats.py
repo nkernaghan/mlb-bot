@@ -154,28 +154,58 @@ def fetch_pitcher_stats(player_id, player_name, team=None):
         pass
 
     # MLB API — first-inning splits (sitCodes=i01) for NRFI model
+    # Fetch current + prior year, blend when current-year sample is small
     try:
-        resp = requests.get(
-            f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats",
-            params={"stats": "statSplits", "group": "pitching", "season": SEASON_YEAR, "sitCodes": "i01"},
-            timeout=10,
-        )
-        if resp.status_code == 200:
+        cur_ip_1st = 0
+        cur_runs_1st = 0
+        cur_er_1st = 0
+        prior_ip_1st = 0
+        prior_runs_1st = 0
+        prior_er_1st = 0
+
+        for yr in [SEASON_YEAR, SEASON_YEAR - 1]:
+            resp = requests.get(
+                f"https://statsapi.mlb.com/api/v1/people/{player_id}/stats",
+                params={"stats": "statSplits", "group": "pitching", "season": yr, "sitCodes": "i01"},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                continue
             data = resp.json()
             for stat_group in data.get("stats", []):
                 for split in stat_group.get("splits", []):
                     st = split.get("stat", {})
-                    ip_1st = _parse_innings(st.get("inningsPitched", "0"))
-                    er_1st = int(st.get("earnedRuns", 0))
-                    runs_1st = int(st.get("runs", 0))
-                    if ip_1st > 0:
-                        stats["first_inning_era"] = round(er_1st / ip_1st * 9, 2)
-                        # NRFI rate: percentage of first innings with 0 runs allowed
-                        # Total 1st innings ≈ IP (since each is 1 inning max)
-                        total_1st_innings = round(ip_1st)  # Each clean 1st = 1.0 IP
-                        scoreless_1st = total_1st_innings - runs_1st  # Approximate
-                        if total_1st_innings > 0:
-                            stats["nrfi_rate"] = round(max(0, scoreless_1st) / total_1st_innings * 100, 1)
+                    ip = _parse_innings(st.get("inningsPitched", "0"))
+                    er = int(st.get("earnedRuns", 0))
+                    runs = int(st.get("runs", 0))
+                    if yr == SEASON_YEAR:
+                        cur_ip_1st, cur_runs_1st, cur_er_1st = ip, runs, er
+                    else:
+                        prior_ip_1st, prior_runs_1st, prior_er_1st = ip, runs, er
+
+        # Blend: weight current year more as starts accumulate
+        # <5 GS: 30/70 current/prior, 5-15 GS: 60/40, 15+: 100/0
+        gs = stats.get("games_started") or 0
+        if gs >= 15 or prior_ip_1st == 0:
+            total_ip = cur_ip_1st
+            total_runs = cur_runs_1st
+            total_er = cur_er_1st
+        elif gs < 5 and prior_ip_1st > 0:
+            total_ip = cur_ip_1st + prior_ip_1st
+            total_runs = cur_runs_1st + prior_runs_1st
+            total_er = cur_er_1st + prior_er_1st
+        else:
+            # 5-15 GS: 60/40 blend via weighted combination
+            total_ip = cur_ip_1st + 0.67 * prior_ip_1st
+            total_runs = cur_runs_1st + 0.67 * prior_runs_1st
+            total_er = cur_er_1st + 0.67 * prior_er_1st
+
+        if total_ip > 0:
+            stats["first_inning_era"] = round(total_er / total_ip * 9, 2)
+            total_1st_innings = round(total_ip)
+            scoreless_1st = total_1st_innings - round(total_runs)
+            if total_1st_innings > 0:
+                stats["nrfi_rate"] = round(max(0, scoreless_1st) / total_1st_innings * 100, 1)
     except Exception:
         pass
 

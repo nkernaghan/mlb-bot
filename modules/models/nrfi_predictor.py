@@ -67,20 +67,23 @@ def predict_nrfi(game, home_pitcher, away_pitcher, home_batting_top,
     # --- Historical NRFI rate ---
     # Pitchers with strong NRFI track records get a small probability boost;
     # pitchers who consistently give up first-inning runs get penalized.
+    # Only applies with 5+ starts — below that the rate is noise.
     home_nrfi = home_pitcher.get("nrfi_rate")
     away_nrfi = away_pitcher.get("nrfi_rate")
+    home_starts = home_pitcher.get("games_started") or 0
+    away_starts = away_pitcher.get("games_started") or 0
 
-    if home_nrfi and home_nrfi > 70:
+    if home_nrfi and home_starts >= 5 and home_nrfi > 70:
         boost = min(0.04, (home_nrfi - 70) * 0.001)
         home_scoreless_prob *= (1 + boost)
         reasons.append(f"{game['home_pitcher_name']} NRFI rate: {home_nrfi:.0f}%")
-    elif home_nrfi and home_nrfi < 40:
+    elif home_nrfi and home_starts >= 5 and home_nrfi < 40:
         home_scoreless_prob *= 0.97
-    if away_nrfi and away_nrfi > 70:
+    if away_nrfi and away_starts >= 5 and away_nrfi > 70:
         boost = min(0.04, (away_nrfi - 70) * 0.001)
         away_scoreless_prob *= (1 + boost)
         reasons.append(f"{game['away_pitcher_name']} NRFI rate: {away_nrfi:.0f}%")
-    elif away_nrfi and away_nrfi < 40:
+    elif away_nrfi and away_starts >= 5 and away_nrfi < 40:
         away_scoreless_prob *= 0.97
 
     # --- Leadoff hitter quality ---
@@ -232,7 +235,7 @@ def predict_nrfi(game, home_pitcher, away_pitcher, home_batting_top,
     signal_agreement = {
         "both_fip_low": home_fip < 3.50 and away_fip < 3.50,
         "both_fstrike_high": (home_fstrike or 0) > 63 and (away_fstrike or 0) > 63,
-        "both_nrfi_high": (home_nrfi or 0) > 65 and (away_nrfi or 0) > 65,
+        "both_nrfi_high": (home_nrfi or 0) > 65 and (away_nrfi or 0) > 65 and home_starts >= 5 and away_starts >= 5,
         "leadoff_k_high": (
             (away_leadoff_k or 0) > 28 or (home_leadoff_k or 0) > 28
         ),
