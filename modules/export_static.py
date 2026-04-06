@@ -41,8 +41,10 @@ def export_all():
             f"SELECT * FROM odds WHERE game_pk IN ({placeholders})", game_pks
         ).fetchall()]
 
-    # Export ALL results (full season for P&L)
-    results_raw = [dict(r) for r in conn.execute("SELECT * FROM results").fetchall()]
+    # Export BET results only for P&L (LEANs are informational, not tracked)
+    results_raw = [dict(r) for r in conn.execute(
+        "SELECT * FROM results WHERE grade = 'BET'"
+    ).fetchall()]
 
     # Calculate units and P&L for each result
     results = []

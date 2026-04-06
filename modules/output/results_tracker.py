@@ -34,8 +34,8 @@ def grade_results(date_str):
         bet_type = pred["bet_type"]
         grade = pred["grade"] or ""
 
-        # Skip PASS picks — they're not actionable bets
-        if grade == "PASS" or pred["pick"] == "PASS":
+        # Only grade BET picks — LEANs are informational, not tracked
+        if grade != "BET":
             continue
 
         try:
