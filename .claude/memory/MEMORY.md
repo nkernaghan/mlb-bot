@@ -1,0 +1,6 @@
+- [Model changes April 2 2026](changes_2026_04_02.md) — Bug fixes, data pipeline fixes, and model logic changes from Apr 2
+- [Changes April 7 2026](changes_2026_04_07.md) — DraftKings K props, game predictor fix, P&L filters, alt line logic
+- [K props DraftKings](k_props_draftkings.md) — Real DK lines via BettingPros API (book_id=12), replaces PrizePicks/Underdog
+- [User bets on DraftKings](user_bets_draftkings.md) — Nick bets on DK, only use real sportsbook lines
+- [No DFS platforms](feedback_no_dfs_platforms.md) — Never use PrizePicks/Underdog for lines, they went 0-5
+- [Deployment flow](deployment_flow.md) — How to run bot, push to site, start n8n, website URL
