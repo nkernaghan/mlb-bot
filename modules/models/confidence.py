@@ -33,35 +33,39 @@ def grade_pick(confidence, edge, bet_type="game"):
 
 
 def calc_game_confidence(data_flags, signal_agreement, contradictions):
-    """Calculate confidence score for game predictions (0-100)."""
+    """Calculate confidence score for game predictions (0-100).
+
+    Data availability is a baseline (max 45). Signal strength and agreement
+    drive the rest — having data doesn't mean the pick is good.
+    """
     score = 0
 
-    # Data availability (max 75)
+    # Data availability baseline (max 45) — necessary but not sufficient
     if data_flags.get("pitcher_stats"):
-        score += 20
-    if data_flags.get("lineup_confirmed"):
-        score += 15
-    if data_flags.get("bullpen_data"):
-        score += 10
-    if data_flags.get("umpire_known"):
-        score += 10
-    if data_flags.get("weather_data"):
-        score += 10
-    if data_flags.get("odds_available"):
-        score += 10
-
-    # Signal agreement bonuses (max 37)
-    if signal_agreement.get("xera_fip_agree"):
-        score += 15
-    if signal_agreement.get("three_plus_aligned"):
         score += 12
-    if signal_agreement.get("market_agrees"):
+    if data_flags.get("lineup_confirmed"):
         score += 10
+    if data_flags.get("bullpen_data"):
+        score += 6
+    if data_flags.get("umpire_known"):
+        score += 5
+    if data_flags.get("weather_data"):
+        score += 5
+    if data_flags.get("odds_available"):
+        score += 7
+
+    # Signal agreement — this is where real confidence comes from (max 45)
+    if signal_agreement.get("xera_fip_agree"):
+        score += 12
+    if signal_agreement.get("three_plus_aligned"):
+        score += 15  # pitcher + lineup + bullpen all agree = strong signal
+    if signal_agreement.get("market_agrees"):
+        score += 18  # model AND market agree = highest confidence boost
 
     # Penalties
-    score -= contradictions * 8
+    score -= contradictions * 12  # model/market disagree = big penalty
     if data_flags.get("park_extreme"):
-        score -= 10
+        score -= 8
 
     return max(0, min(100, score))
 

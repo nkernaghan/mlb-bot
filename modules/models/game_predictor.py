@@ -161,9 +161,9 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
 
     model_implied_home = _runs_edge_to_probability(model_home_runs_edge)
 
-    # Model-led blend: 50/50 so the model has real influence
+    # Market-led blend: 60/40 market/model — Vegas is sharper than the model
     if market_implied_home is not None:
-        blended_home_prob = 0.50 * model_implied_home + 0.50 * market_implied_home
+        blended_home_prob = MARKET_WEIGHT * market_implied_home + MODEL_WEIGHT * model_implied_home
     else:
         blended_home_prob = model_implied_home
 
@@ -199,10 +199,10 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
         market_prob = market_implied_home if pick_home else (1 - market_implied_home)
         edge = round((pick_prob - market_prob) * 100, 1)
 
-        # Only flip to underdog if model INDEPENDENTLY likes them (>48% pre-blend)
+        # Only flip to underdog if model INDEPENDENTLY favors them (>52% pre-blend)
         if edge < 0:
             opp_model_prob = (1 - model_implied_home) if pick_home else model_implied_home
-            if opp_model_prob >= 0.48:
+            if opp_model_prob >= 0.52:
                 pick_home = not pick_home
                 pick_team = game["home_team_name"] if pick_home else game["away_team_name"]
                 pick_prob = blended_home_prob if pick_home else (1 - blended_home_prob)
