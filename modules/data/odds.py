@@ -425,6 +425,85 @@ def parse_k_props(bookmaker: dict) -> list[dict]:
     return props
 
 
+# ---------------------------------------------------------------------------
+# BettingPros — DraftKings pitcher strikeout lines with juice (free, no auth)
+# ---------------------------------------------------------------------------
+
+_bettingpros_cache: dict | None = None
+
+
+def fetch_draftkings_k_props() -> dict[str, dict]:
+    """Fetch DraftKings pitcher strikeout lines via BettingPros API.
+
+    Returns a dict keyed by pitcher name with line, over_price, and under_price.
+    Uses real DraftKings odds — not DFS platforms.
+    """
+    global _bettingpros_cache
+    if _bettingpros_cache is not None:
+        return _bettingpros_cache
+
+    from datetime import date
+    today = date.today().strftime("%Y-%m-%d")
+    url = "https://api.bettingpros.com/v3/props"
+    params = {
+        "sport": "MLB",
+        "date": today,
+        "market_id": 285,   # pitcher strikeouts
+        "book_id": 12,      # 12 = DraftKings
+        "page": 1,
+        "per_page": 100,
+    }
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        print(f"  DraftKings K props unavailable ({exc})")
+        _bettingpros_cache = {}
+        return _bettingpros_cache
+
+    result: dict[str, dict] = {}
+    for prop in data.get("props", []):
+        participant = prop.get("participant", {})
+        name = participant.get("name", "")
+        if not name:
+            continue
+
+        over_data = prop.get("over", {})
+        under_data = prop.get("under", {})
+        line_val = over_data.get("line")
+        if line_val is None:
+            continue
+        try:
+            line_val = float(line_val)
+        except (ValueError, TypeError):
+            continue
+
+        over_price = over_data.get("odds")
+        under_price = under_data.get("odds")
+        try:
+            over_price = int(over_price) if over_price is not None else None
+        except (ValueError, TypeError):
+            over_price = None
+        try:
+            under_price = int(under_price) if under_price is not None else None
+        except (ValueError, TypeError):
+            under_price = None
+
+        result[name] = {
+            "pitcher_name": name,
+            "line": line_val,
+            "over_price": over_price,
+            "under_price": under_price,
+            "bookmaker": "draftkings",
+        }
+
+    _bettingpros_cache = result
+    print(f"  DraftKings K props loaded: {len(result)} pitchers (via BettingPros)")
+    return _bettingpros_cache
+
+
 def parse_nrfi_odds(bookmaker: dict) -> dict | None:
     """Parse NRFI/YRFI odds from a bookmaker."""
     for market in bookmaker.get("markets", []):

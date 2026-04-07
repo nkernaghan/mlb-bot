@@ -185,6 +185,13 @@ def sync_to_pocketbase(db_path="data/mlb.db", target_date=None):
                         elif pick_lower and (pick_lower in away_lower or away_lower in pick_lower):
                             pick_ml = odds_row["away_ml"]
 
+            # Get game date (needed for unit sizing and PB record)
+            game_row = cur.execute(
+                "SELECT game_date FROM games WHERE game_pk=? LIMIT 1",
+                (r["game_pk"],)
+            ).fetchone()
+            game_date = game_row["game_date"] if game_row else ""
+
             # Unit sizing — underdogs capped, favorites use edge tiers
             # Games before 2026-04-02 use legacy edge-only tiers;
             # 2026-04-02+ require edge + confidence to exceed 1u
@@ -221,13 +228,6 @@ def sync_to_pocketbase(db_path="data/mlb.db", target_date=None):
             else:  # PUSH or unknown
                 pnl_units = 0
             pnl_dollars = pnl_units * 100
-
-            # Get game date
-            game_row = cur.execute(
-                "SELECT game_date FROM games WHERE game_pk=? LIMIT 1",
-                (r["game_pk"],)
-            ).fetchone()
-            game_date = game_row["game_date"] if game_row else ""
 
             try:
                 requests.post(f"{PB_URL}/collections/mlb_results/records", headers=headers, json={

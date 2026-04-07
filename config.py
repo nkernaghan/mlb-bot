@@ -37,7 +37,7 @@ MODEL_WEIGHT = 0.40
 
 # Confidence thresholds
 BET_MIN_CONFIDENCE = 65
-BET_MIN_EDGE = 3.0  # percentage
+BET_MIN_EDGE = 5.0  # percentage — raised from 3.0; smaller edges are market noise
 LEAN_MIN_CONFIDENCE = 45
 LEAN_MIN_EDGE = 1.0
 

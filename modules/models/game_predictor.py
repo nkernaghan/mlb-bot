@@ -161,8 +161,9 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
 
     model_implied_home = _runs_edge_to_probability(model_home_runs_edge)
 
+    # Model-led blend: 50/50 so the model has real influence
     if market_implied_home is not None:
-        blended_home_prob = (MARKET_WEIGHT * market_implied_home) + (MODEL_WEIGHT * model_implied_home)
+        blended_home_prob = 0.50 * model_implied_home + 0.50 * market_implied_home
     else:
         blended_home_prob = model_implied_home
 
@@ -178,8 +179,7 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
     if rlm:
         rlm_dir = rlm["direction"]
         rlm_div = abs(rlm["divergence"])
-        # Adjust blended probability toward sharp money direction
-        rlm_adj = rlm_div * 0.005  # 2% divergence = 1% prob adjustment
+        rlm_adj = rlm_div * 0.005
         if rlm_dir == "home":
             blended_home_prob = min(0.85, blended_home_prob + rlm_adj)
             reasons.append(f"Sharp money favors {game['home_team_name']} ({rlm_div:.1f}% book divergence)")
@@ -187,9 +187,9 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
             blended_home_prob = max(0.15, blended_home_prob - rlm_adj)
             reasons.append(f"Sharp money favors {game['away_team_name']} ({rlm_div:.1f}% book divergence)")
 
-    # --- Determine pick: find where the VALUE is ---
-    # Start with the blended favorite
-    pick_home = blended_home_prob > 0.5
+    # --- Determine pick ---
+    # Pick the side the MODEL independently favors, then check for market edge
+    pick_home = model_implied_home > 0.5
     pick_team = game["home_team_name"] if pick_home else game["away_team_name"]
     pick_prob = blended_home_prob if pick_home else (1 - blended_home_prob)
 
@@ -199,16 +199,19 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
         market_prob = market_implied_home if pick_home else (1 - market_implied_home)
         edge = round((pick_prob - market_prob) * 100, 1)
 
-        # If edge is negative, the value is on the OTHER side (underdog)
-        if edge < -2.0:
-            pick_home = not pick_home
-            pick_team = game["home_team_name"] if pick_home else game["away_team_name"]
-            pick_prob = blended_home_prob if pick_home else (1 - blended_home_prob)
-            market_prob = market_implied_home if pick_home else (1 - market_implied_home)
-            edge = round((pick_prob - market_prob) * 100, 1)
-            # Edge is now positive (model says underdog is undervalued)
-            if edge > 0:
-                reasons.append(f"Value on underdog — market overvalues favorite by {edge:.1f}%")
+        # Only flip to underdog if model INDEPENDENTLY likes them (>48% pre-blend)
+        if edge < 0:
+            opp_model_prob = (1 - model_implied_home) if pick_home else model_implied_home
+            if opp_model_prob >= 0.48:
+                pick_home = not pick_home
+                pick_team = game["home_team_name"] if pick_home else game["away_team_name"]
+                pick_prob = blended_home_prob if pick_home else (1 - blended_home_prob)
+                market_prob = market_implied_home if pick_home else (1 - market_implied_home)
+                edge = round((pick_prob - market_prob) * 100, 1)
+                if edge > 0:
+                    reasons.append(f"Value on underdog — market overvalues favorite by {edge:.1f}%")
+            else:
+                edge = 0  # No conviction on either side — PASS
 
     # --- Confidence ---
     data_flags = {
@@ -284,16 +287,29 @@ def predict_game(game, home_pitcher, away_pitcher, home_batting, away_batting,
 def _pitcher_quality_score(pitcher):
     """Score pitcher quality. Lower = better pitcher.
 
-    Weighted ensemble: xERA (30%), FIP (25%), xFIP (20%), SIERA (15%), ERA (10%).
-    Falls back gracefully when metrics are missing, re-normalizing weights.
+    Weighted ensemble: xERA, FIP, xFIP, SIERA, ERA.
+    Early season (<5 starts): ERA gets more weight, xERA gets less (noisy on small samples).
     """
-    metrics = {
-        "xera": (pitcher.get("xera"), 0.30),
-        "fip": (pitcher.get("fip"), 0.25),
-        "xfip": (pitcher.get("xfip"), 0.20),
-        "siera": (pitcher.get("siera"), 0.15),
-        "era": (pitcher.get("era"), 0.10),
-    }
+    starts = pitcher.get("games_started") or 0
+    early = starts < 5
+
+    if early:
+        # ERA is more stable with few starts; xERA needs 50+ batters faced
+        metrics = {
+            "xera": (pitcher.get("xera"), 0.10),
+            "fip": (pitcher.get("fip"), 0.25),
+            "xfip": (pitcher.get("xfip"), 0.20),
+            "siera": (pitcher.get("siera"), 0.15),
+            "era": (pitcher.get("era"), 0.30),
+        }
+    else:
+        metrics = {
+            "xera": (pitcher.get("xera"), 0.30),
+            "fip": (pitcher.get("fip"), 0.25),
+            "xfip": (pitcher.get("xfip"), 0.20),
+            "siera": (pitcher.get("siera"), 0.15),
+            "era": (pitcher.get("era"), 0.10),
+        }
 
     total_weight = 0
     weighted_sum = 0

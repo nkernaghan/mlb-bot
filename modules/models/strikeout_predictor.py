@@ -195,18 +195,24 @@ def predict_strikeouts(
     risks = []
     if k_prop_odds:
         line = k_prop_odds.get("line")
+    # Detect if line is from a real sportsbook — only DraftKings/FanDuel qualify
+    # PrizePicks and Underdog are DFS platforms, not real books
+    real_books = ("draftkings", "fanduel", "betmgm", "caesars", "pointsbet", "betrivers")
+    is_real_book = k_prop_odds.get("bookmaker", "") in real_books if k_prop_odds else False
+
     if line is not None:
-        if line >= 8.5:
+        if line >= 9.0:
             model_ks = round(model_ks * TTOP_85_ADJUSTMENT, 1)
-            risks.append("High line (8.5+) — TTOP risk (12% haircut applied)")
+            risks.append("High line (9.0+) — TTOP risk (12% haircut applied)")
         elif line >= 7.5:
             model_ks = round(model_ks * TTOP_75_ADJUSTMENT, 1)
             risks.append("High line (7.5+) — TTOP risk (8% haircut applied)")
 
     # --- Market blending ---
-    # Blend the model projection (post-TTOP) with the market line.
+    # Only blend with real sportsbook lines. PrizePicks lines are generic
+    # (often 4.5 for everyone) and would dilute the model's edge.
     market_blended = False
-    if line is not None:
+    if line is not None and is_real_book:
         blended_ks = round(
             K_MODEL_WEIGHT * model_ks + K_MARKET_WEIGHT * line, 1
         )
@@ -221,7 +227,21 @@ def predict_strikeouts(
     pick = "OVER" if edge > 0.5 else "UNDER" if edge < -0.5 else "PASS"
     if line is None:
         pick = "PASS"
-    pick_detail = f"{pick} {line}" if line else f"Model: {model_ks} Ks"
+
+    # Alternate line logic: when the over juice is worse than -110,
+    # recommend the flat lower number (e.g., "6 Ks" instead of "OVER 6.5").
+    alt_line = None
+    if pick == "OVER" and line is not None and k_prop_odds:
+        over_price = k_prop_odds.get("over_price")
+        if over_price is not None and over_price < -110:
+            alt_line = line - 0.5
+
+    if alt_line is not None:
+        pick_detail = f"OVER {int(alt_line)} Ks (juice on {line} is {over_price})"
+    elif line:
+        pick_detail = f"{pick} {line}"
+    else:
+        pick_detail = f"Model: {model_ks} Ks"
 
     # Strong signal agreement: model substantially above market line
     strong_agreement = line is not None and (model_ks - line) >= 1.0
@@ -269,6 +289,7 @@ def predict_strikeouts(
         "reasons": reasons[:5],
         "risks": risks[:3],
         "expected_batters": expected_batters,
+        "alt_line": alt_line,
     }
 
 

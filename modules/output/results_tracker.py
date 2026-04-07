@@ -153,21 +153,27 @@ def _grade_k_pick(game_pk, pred):
     matched_name = ""
     for side in ["away", "home"]:
         pitchers = boxscore.get(f"{side}Pitchers", [])
-        if len(pitchers) < 2:
-            continue
-        starter = pitchers[1]  # index 0 is header
-        starter_name = starter.get("name", "")
+        # Skip header row(s) — they have non-numeric "K" values
+        for pitcher_entry in pitchers:
+            k_val = pitcher_entry.get("k", "")
+            # Skip header rows where k is a string like "K"
+            if isinstance(k_val, str) and not k_val.isdigit():
+                continue
+            starter_name = pitcher_entry.get("name", "")
+            if not starter_name:
+                continue
 
-        if target_pitcher:
-            # Match by name
-            if (target_pitcher in starter_name or starter_name in target_pitcher or
-                target_pitcher.split()[-1] in starter_name):
-                try:
-                    actual_ks = int(starter.get("k", 0))
-                except (ValueError, TypeError):
-                    continue
-                matched_name = starter_name
-                break
+            if target_pitcher:
+                if (target_pitcher in starter_name or starter_name in target_pitcher or
+                    target_pitcher.split()[-1] in starter_name):
+                    try:
+                        actual_ks = int(k_val)
+                    except (ValueError, TypeError):
+                        continue
+                    matched_name = starter_name
+                    break
+        if actual_ks is not None:
+            break
         else:
             # No pitcher name stored — skip this prediction
             return None
@@ -178,7 +184,11 @@ def _grade_k_pick(game_pk, pred):
     pick = pred["pick"]
     line = pred["market_value"]
     if line is None or line == 0:
-        return None
+        # Fallback: use model projection rounded to nearest 0.5 as proxy line
+        line = pred.get("model_value")
+        if line is None or line == 0:
+            return None
+        line = round(line * 2) / 2  # round to nearest 0.5
 
     if pick == "OVER":
         result = "WIN" if actual_ks > line else "LOSS" if actual_ks < line else "PUSH"

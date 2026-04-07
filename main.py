@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import SEASON_YEAR
 from modules.database import init_db, get_connection
 from modules.data.schedule import fetch_games, fetch_lineups, fetch_rest_travel, save_games
-from modules.data.odds import fetch_game_odds, fetch_event_props, parse_game_odds, parse_k_props, parse_nrfi_odds, get_consensus_odds, save_odds
+from modules.data.odds import fetch_game_odds, fetch_event_props, parse_game_odds, parse_k_props, parse_nrfi_odds, get_consensus_odds, save_odds, fetch_draftkings_k_props
 from modules.data.cache import refresh_daily_caches
 from modules.data.pitcher_stats import fetch_pitcher_stats, save_pitcher_stats
 from modules.data.batter_stats import fetch_batter_stats, fetch_team_batting_stats
@@ -141,7 +141,19 @@ def analyze_game(game, odds_by_event, injuries_cache, bullpen_usage_cache, rest_
             ]:
                 if not pitcher.get("player_id"):
                     continue
-                k_odds = game_odds.get("k_props", {}).get(pitcher.get("player_name"))
+                k_odds = None
+                k_props_dict = game_odds.get("k_props", {})
+                pname = pitcher.get("player_name", "")
+                if pname:
+                    # Exact match first
+                    k_odds = k_props_dict.get(pname)
+                    # Fuzzy: match by last name
+                    if not k_odds:
+                        plast = pname.split()[-1].lower()
+                        for kn, kv in k_props_dict.items():
+                            if kn.split()[-1].lower() == plast:
+                                k_odds = kv
+                                break
                 bb_rate = pitcher.get("bb_rate")
                 try:
                     pred = predict_strikeouts(
@@ -309,6 +321,24 @@ def main():
                 print(f"    Props fetch error for event {event_id}: {e}")
         if prop_count:
             print(f"  Props loaded for {prop_count} events")
+
+        # Fallback: fill missing K props from DraftKings (via BettingPros)
+        missing_k = sum(1 for g in odds_by_event.values() if not g.get("k_props"))
+        if missing_k > 0:
+            dk_props = fetch_draftkings_k_props()
+            if dk_props:
+                filled = 0
+                for game_pk, game_odds in odds_by_event.items():
+                    if game_odds.get("k_props"):
+                        continue
+                    ginfo = next((g for g in games if g["game_pk"] == game_pk), None)
+                    if not ginfo:
+                        continue
+                    for dk_name, dk_data in dk_props.items():
+                        game_odds["k_props"][dk_name] = dk_data
+                    filled += 1
+                if filled:
+                    print(f"  DraftKings K props filled for {filled} games")
 
     except Exception as e:
         print(f"  Odds fetch error (continuing without): {e}")
